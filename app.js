@@ -83,6 +83,11 @@ document.addEventListener('DOMContentLoaded', ()=>{
   $('applyFilterBtn').addEventListener('click', applyInvFilter);
   $('clearFilterBtn').addEventListener('click', clearInvFilter);
 
+  // Receipts
+  $('addReceiptBtn').addEventListener('click', addReceipt);
+  $('recTodayBtn').addEventListener('click', ()=>$('r_date').value=todayISO());
+  $('statementClient').addEventListener('change', renderStatement);
+
   // Expenses
   $('addExpenseBtn').addEventListener('click', addExpense);
   $('expTodayBtn').addEventListener('click', ()=>$('e_date').value=todayISO());
@@ -182,13 +187,18 @@ function openTab(id){
 /* Storage */
 function loadData(){
   const raw=localStorage.getItem(LS_DATA);
-  if(!raw) return {clients:[], invoices:[], expenses:[]};
+  if(!raw) return {clients:[], invoices:[], expenses:[], receipts:[]};
   try{
     const d=JSON.parse(raw);
     if(!d || !Array.isArray(d.clients)||!Array.isArray(d.invoices)||!Array.isArray(d.expenses))
-      return {clients:[], invoices:[], expenses:[]};
-    return d;
-  }catch{ return {clients:[], invoices:[], expenses:[]}; }
+      return {clients:[], invoices:[], expenses:[], receipts:[]};
+    return {
+      clients:d.clients,
+      invoices:d.invoices,
+      expenses:d.expenses,
+      receipts:Array.isArray(d.receipts) ? d.receipts : []
+    };
+  }catch{ return {clients:[], invoices:[], expenses:[], receipts:[]}; }
 }
 function saveData(){ localStorage.setItem(LS_DATA, JSON.stringify(data)); }
 function takeSnapshot(){ lastSnapshot = JSON.stringify(data); }
@@ -221,12 +231,13 @@ function deleteClient(id){
   takeSnapshot();
   data.clients=data.clients.filter(x=>x.id!==id);
   data.invoices=data.invoices.filter(i=>i.clientId!==id);
+  data.receipts=data.receipts.filter(r=>r.clientId!==id);
   saveData(); renderAll(); toast('تم الحذف 🗑');
 }
 function clearAll(){
   if(!confirm('أكيد تريد مسح كل البيانات؟')) return;
   takeSnapshot();
-  data={clients:[], invoices:[], expenses:[]};
+  data={clients:[], invoices:[], expenses:[], receipts:[]};
   saveData(); renderAll(); toast('تم المسح');
 }
 
@@ -282,6 +293,42 @@ function clearInvFilter(){
   renderInvoices();
 }
 
+/* Receipts CRUD */
+function addReceipt(){
+  if(data.clients.length===0) return toast('أضف عميل أولاً');
+  const clientId=$('r_client').value;
+  const amount=Number($('r_amount').value);
+  const date=$('r_date').value || todayISO();
+  const note=$('r_note').value.trim();
+  if(!clientId) return toast('اختر عميل');
+  if(!Number.isFinite(amount)||amount<=0) return toast('المبلغ لازم موجب');
+  takeSnapshot();
+  data.receipts.push({id:uid(), clientId, amount, date, note});
+  saveData();
+  $('r_amount').value=''; $('r_date').value=''; $('r_note').value='';
+  renderAll(); toast('تمت إضافة قبض ✅');
+}
+function editReceipt(id){
+  const rec=data.receipts.find(x=>x.id===id); if(!rec) return;
+  const note=prompt('تعديل الملاحظة:', rec.note || '');
+  if(note===null) return;
+  const aStr=prompt('تعديل المبلغ:', String(rec.amount));
+  if(aStr===null) return;
+  const amount=Number(aStr); if(!Number.isFinite(amount)||amount<=0) return toast('المبلغ لازم موجب');
+  const dt=prompt('تعديل التاريخ (YYYY-MM-DD):', rec.date || todayISO());
+  if(dt===null) return;
+  const date=dt.trim(); if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) return toast('صيغة التاريخ غلط');
+  takeSnapshot();
+  rec.note=note.trim(); rec.amount=amount; rec.date=date;
+  saveData(); renderAll(); toast('تم تعديل القبض ✏️');
+}
+function deleteReceipt(id){
+  if(!confirm('حذف القبض؟')) return;
+  takeSnapshot();
+  data.receipts=data.receipts.filter(x=>x.id!==id);
+  saveData(); renderAll(); toast('تم حذف القبض 🗑');
+}
+
 /* Expenses CRUD */
 function addExpense(){
   const desc=$('e_desc').value.trim();
@@ -322,6 +369,9 @@ function renderAll(){
   renderClients();
   renderClientSelects();
   renderInvoices();
+  renderReceipts();
+  renderAccountSummary();
+  renderStatement();
   renderExpenses();
   renderSummary();
 }
@@ -350,13 +400,20 @@ function renderClients(){
 function renderClientSelects(){
   const sel=$('i_client');
   const fsel=$('f_client');
+  const rsel=$('r_client');
+  const statementSel=$('statementClient');
   if(data.clients.length===0){
     sel.innerHTML = `<option value="">لا يوجد عملاء</option>`;
     fsel.innerHTML = `<option value="">كل العملاء</option>`;
+    rsel.innerHTML = `<option value="">لا يوجد عملاء</option>`;
+    statementSel.innerHTML = `<option value="">اختر عميل</option>`;
     return;
   }
-  sel.innerHTML = `<option value="">اختر عميل...</option>` + data.clients.map(c=>`<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
-  fsel.innerHTML = `<option value="">كل العملاء</option>` + data.clients.map(c=>`<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+  const options = data.clients.map(c=>`<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+  sel.innerHTML = `<option value="">اختر عميل...</option>` + options;
+  fsel.innerHTML = `<option value="">كل العملاء</option>` + options;
+  rsel.innerHTML = `<option value="">اختر عميل...</option>` + options;
+  statementSel.innerHTML = `<option value="">اختر عميل...</option>` + options;
 }
 function renderInvoices(){
   const tbody=$('invoiceRows');
@@ -394,6 +451,145 @@ function renderInvoices(){
   tbody.querySelectorAll('[data-ei]').forEach(b=>b.addEventListener('click', ()=>editInvoice(b.dataset.ei)));
   tbody.querySelectorAll('[data-di]').forEach(b=>b.addEventListener('click', ()=>deleteInvoice(b.dataset.di)));
   if(window.renderMonthlyYearlyCharts) window.renderMonthlyYearlyCharts(data);
+}
+
+function getClientTotals(clientId){
+  const invoicesTotal = data.invoices
+    .filter(i=>i.clientId===clientId)
+    .reduce((s,x)=>s+(+x.amount||0),0);
+  const receiptsTotal = data.receipts
+    .filter(r=>r.clientId===clientId)
+    .reduce((s,x)=>s+(+x.amount||0),0);
+  return {invoicesTotal, receiptsTotal, balance: invoicesTotal - receiptsTotal};
+}
+
+function renderReceipts(){
+  const tbody=$('receiptRows');
+  if(data.receipts.length===0){
+    tbody.innerHTML = `<tr><td colspan="5" class="muted">لا توجد قبوضات.</td></tr>`;
+    renderReceiptCards([]);
+    return;
+  }
+  const cmap=new Map(data.clients.map(c=>[c.id,c.name]));
+  const list=[...data.receipts].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  tbody.innerHTML = list.map(r=>`
+    <tr>
+      <td>${escapeHtml(cmap.get(r.clientId)||'—')}</td>
+      <td>${escapeHtml(r.note||'—')}</td>
+      <td>${money(r.amount)}</td>
+      <td>${escapeHtml(r.date||'')}</td>
+      <td>
+        <div class="actions-cell">
+          <button class="btn small ghost" data-er="${r.id}">✏️</button>
+          <button class="btn small ghost" style="border-color: rgba(255,59,48,.35); color: var(--danger);" data-dr="${r.id}">🗑</button>
+        </div>
+      </td>
+    </tr>
+  `).join('');
+  tbody.querySelectorAll('[data-er]').forEach(b=>b.addEventListener('click', ()=>editReceipt(b.dataset.er)));
+  tbody.querySelectorAll('[data-dr]').forEach(b=>b.addEventListener('click', ()=>deleteReceipt(b.dataset.dr)));
+  renderReceiptCards(list);
+}
+
+function renderAccountSummary(){
+  const tbody=$('accountRows');
+  const cards=$('accountCards');
+  if(data.clients.length===0){
+    tbody.innerHTML = `<tr><td colspan="4" class="muted">لا يوجد عملاء.</td></tr>`;
+    cards.innerHTML = `<div class="item-card"><div class="item-title">لا يوجد عملاء</div><div class="item-sub">أضف عميل لعرض الحساب العام.</div></div>`;
+    return;
+  }
+  const rows=data.clients.map(c=>{
+    const totals=getClientTotals(c.id);
+    return {client:c, ...totals};
+  });
+  tbody.innerHTML = rows.map(r=>`
+    <tr>
+      <td>${escapeHtml(r.client.name)}</td>
+      <td>${money(r.invoicesTotal)}</td>
+      <td>${money(r.receiptsTotal)}</td>
+      <td>${money(r.balance)}</td>
+    </tr>
+  `).join('');
+  cards.innerHTML = rows.map(r=>`
+    <div class="item-card">
+      <div class="item-head">
+        <div>
+          <div class="item-title">${escapeHtml(r.client.name)}</div>
+          <div class="item-meta">
+            <span class="pill">${money(r.invoicesTotal)}</span>
+            <span class="pill">${money(r.receiptsTotal)}</span>
+            <span class="pill" style="background:rgba(52,199,89,.12);border-color:rgba(52,199,89,.2);color:#34C759">${money(r.balance)}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderStatement(){
+  const rowsEl=$('statementRows');
+  const summaryEl=$('statementSummary');
+  const clientId=$('statementClient').value;
+  if(!clientId){
+    rowsEl.innerHTML = `<tr><td colspan="6" class="muted">اختر عميل لعرض كشف الحساب.</td></tr>`;
+    summaryEl.textContent = '';
+    return;
+  }
+  const client=data.clients.find(c=>c.id===clientId);
+  if(!client){
+    rowsEl.innerHTML = `<tr><td colspan="6" class="muted">العميل غير موجود.</td></tr>`;
+    summaryEl.textContent = '';
+    return;
+  }
+  const items=[
+    ...data.invoices.filter(i=>i.clientId===clientId).map(i=>({
+      date:i.date || '',
+      type:'فاتورة',
+      desc:i.desc,
+      debit:+i.amount||0,
+      credit:0
+    })),
+    ...data.receipts.filter(r=>r.clientId===clientId).map(r=>({
+      date:r.date || '',
+      type:'قبض',
+      desc:r.note || 'قبض',
+      debit:0,
+      credit:+r.amount||0
+    }))
+  ];
+  if(items.length===0){
+    rowsEl.innerHTML = `<tr><td colspan="6" class="muted">لا توجد حركة لهذا العميل.</td></tr>`;
+    summaryEl.textContent = '';
+    return;
+  }
+  items.sort((a,b)=>{
+    const cmp=(a.date||'').localeCompare(b.date||'');
+    if(cmp!==0) return cmp;
+    if(a.type===b.type) return 0;
+    return a.type==='فاتورة' ? -1 : 1;
+  });
+  let balance=0;
+  const rows=items.map(item=>{
+    balance += item.debit - item.credit;
+    return `
+      <tr>
+        <td>${escapeHtml(item.date)}</td>
+        <td>${escapeHtml(item.type)}</td>
+        <td>${escapeHtml(item.desc)}</td>
+        <td>${item.debit ? money(item.debit) : '—'}</td>
+        <td>${item.credit ? money(item.credit) : '—'}</td>
+        <td>${money(balance)}</td>
+      </tr>
+    `;
+  }).join('');
+  rowsEl.innerHTML = rows;
+  const totals=getClientTotals(clientId);
+  summaryEl.innerHTML = `
+    <span>إجمالي الفواتير: ${money(totals.invoicesTotal)}</span>
+    <span>إجمالي القبوضات: ${money(totals.receiptsTotal)}</span>
+    <span>الرصيد: ${money(totals.balance)}</span>
+  `;
 }
 function renderExpenses(){
   const tbody=$('expenseRows');
@@ -442,6 +638,7 @@ function exportAllCSV(){
   const rows=[
     ['النوع','العميل','الوصف','المبلغ','التاريخ'],
     ...data.invoices.map(i=>['فاتورة',cmap.get(i.clientId)||'',i.desc,i.amount,i.date]),
+    ...data.receipts.map(r=>['قبض',cmap.get(r.clientId)||'',r.note||'',r.amount,r.date]),
     ...data.expenses.map(e=>['مصروف','',e.desc,e.amount,e.date])
   ];
   const line=(r)=>r.map(v=>`"${String(v??'').replaceAll('"','""')}"`).join(',');
@@ -473,7 +670,7 @@ async function restoreJSON(){
       return toast('الملف مو بصيغة صحيحة');
     }
     takeSnapshot();
-    data=imported;
+    data={...imported, receipts:Array.isArray(imported.receipts) ? imported.receipts : []};
     saveData(); renderAll();
     toast('تم الاسترجاع ✅');
   }catch{ toast('فشل قراءة الملف'); }
@@ -618,6 +815,35 @@ function renderInvoiceCards(list){
   `).join('');
   box.querySelectorAll('[data-ei]').forEach(b=>b.addEventListener('click', ()=>editInvoice(b.dataset.ei)));
   box.querySelectorAll('[data-di]').forEach(b=>b.addEventListener('click', ()=>deleteInvoice(b.dataset.di)));
+}
+
+function renderReceiptCards(list){
+  const box=document.getElementById('receiptCards'); if(!box) return;
+  const cmap=new Map(data.clients.map(c=>[c.id,c.name]));
+  if(!list || list.length===0){
+    box.innerHTML = `<div class="item-card"><div class="item-title">لا توجد قبوضات</div><div class="item-sub">أضف قبض من الأعلى.</div></div>`;
+    return;
+  }
+  box.innerHTML = list.map(r=>`
+    <div class="item-card">
+      <div class="item-head">
+        <div>
+          <div class="item-title">${escapeHtml(cmap.get(r.clientId)||'—')}</div>
+          <div class="item-sub">${escapeHtml(r.note||'—')}</div>
+          <div class="item-meta">
+            <span class="pill">${money(r.amount)}</span>
+            <span class="pill" style="background:rgba(107,114,128,.10);border-color:rgba(107,114,128,.18);color:var(--muted)">${escapeHtml(r.date||'')}</span>
+          </div>
+        </div>
+        <div class="item-actions">
+          <button class="btn small ghost" data-er="${r.id}">✏️</button>
+          <button class="btn small ghost" style="border-color: rgba(255,59,48,.35); color: var(--danger);" data-dr="${r.id}">🗑</button>
+        </div>
+      </div>
+    </div>
+  `).join('');
+  box.querySelectorAll('[data-er]').forEach(b=>b.addEventListener('click', ()=>editReceipt(b.dataset.er)));
+  box.querySelectorAll('[data-dr]').forEach(b=>b.addEventListener('click', ()=>deleteReceipt(b.dataset.dr)));
 }
 
 function renderExpenseCards(list){
