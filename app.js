@@ -378,6 +378,7 @@ function renderAll(){
   renderSummary();
   renderStatement();
   renderReceiptSummary();
+  renderGeneralAccount();
 }
 function renderClients(){
   const tbody=$('clientRows');
@@ -529,6 +530,44 @@ function renderReceiptSummary(){
     $('r_total_due').textContent=money(totalDue);
     $('r_total_due').style.color = totalDue>0 ? 'var(--danger)' : totalDue<0 ? '#34C759' : 'var(--text)';
   }
+}
+function renderGeneralAccount(){
+  const tbody=$('generalAccountRows');
+  if(!tbody) return;
+  if(data.clients.length===0){
+    tbody.innerHTML = `<tr><td colspan="4" class="muted">لا يوجد عملاء بعد.</td></tr>`;
+    return;
+  }
+  const rows=data.clients.map(client=>{
+    const totals=getClientTotals(client.id);
+    return {
+      name: client.name,
+      invoices: totals.invoices,
+      receipts: totals.receipts,
+      balance: totals.balance
+    };
+  });
+  const totals=rows.reduce((acc,row)=>({
+    invoices: acc.invoices + row.invoices,
+    receipts: acc.receipts + row.receipts,
+    balance: acc.balance + row.balance
+  }), {invoices:0, receipts:0, balance:0});
+
+  tbody.innerHTML = rows.map(row=>`
+    <tr>
+      <td>${escapeHtml(row.name)}</td>
+      <td>${money(row.invoices)}</td>
+      <td>${money(row.receipts)}</td>
+      <td>${money(row.balance)}</td>
+    </tr>
+  `).join('') + `
+    <tr>
+      <td><strong>الإجمالي</strong></td>
+      <td><strong>${money(totals.invoices)}</strong></td>
+      <td><strong>${money(totals.receipts)}</strong></td>
+      <td><strong>${money(totals.balance)}</strong></td>
+    </tr>
+  `;
 }
 function renderStatement(){
   const tbody=$('statementRows');
