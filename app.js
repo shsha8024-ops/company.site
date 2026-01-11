@@ -24,6 +24,11 @@ function escapeHtml(s){
     .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')
     .replaceAll('"','&quot;').replaceAll("'",'&#039;');
 }
+function getClientTotals(clientId){
+  const invoices = data.invoices.filter(i=>i.clientId===clientId).reduce((s,i)=>s+(+i.amount||0),0);
+  const receipts = data.receipts.filter(r=>r.clientId===clientId).reduce((s,r)=>s+(+r.amount||0),0);
+  return { invoices, receipts, balance: invoices - receipts };
+}
 function toast(msg){
   const t=$('toast'); if(!t) return;
   t.textContent=msg;
@@ -87,6 +92,12 @@ document.addEventListener('DOMContentLoaded', ()=>{
   $('addExpenseBtn').addEventListener('click', addExpense);
   $('expTodayBtn').addEventListener('click', ()=>$('e_date').value=todayISO());
   $('expSearch').addEventListener('input', e=>{ expQuery=e.target.value.trim().toLowerCase(); renderExpenses(); });
+
+  // Receipts
+  $('addReceiptBtn').addEventListener('click', addReceipt);
+  $('recTodayBtn').addEventListener('click', ()=>$('r_date').value=todayISO());
+  $('s_client').addEventListener('change', renderStatement);
+  $('printStatementBtn').addEventListener('click', printStatementPDF);
 
   // Export/Backup/Restore/PDF
   $('exportAllBtn').addEventListener('click', exportAllCSV);
@@ -182,13 +193,16 @@ function openTab(id){
 /* Storage */
 function loadData(){
   const raw=localStorage.getItem(LS_DATA);
-  if(!raw) return {clients:[], invoices:[], expenses:[]};
+  if(!raw) return {clients:[], invoices:[], expenses:[], receipts:[]};
   try{
     const d=JSON.parse(raw);
     if(!d || !Array.isArray(d.clients)||!Array.isArray(d.invoices)||!Array.isArray(d.expenses))
-      return {clients:[], invoices:[], expenses:[]};
-    return d;
-  }catch{ return {clients:[], invoices:[], expenses:[]}; }
+      return {clients:[], invoices:[], expenses:[], receipts:[]};
+    return {
+      ...d,
+      receipts: Array.isArray(d.receipts) ? d.receipts : []
+    };
+  }catch{ return {clients:[], invoices:[], expenses:[], receipts:[]}; }
 }
 function saveData(){ localStorage.setItem(LS_DATA, JSON.stringify(data)); }
 function takeSnapshot(){ lastSnapshot = JSON.stringify(data); }
@@ -221,12 +235,13 @@ function deleteClient(id){
   takeSnapshot();
   data.clients=data.clients.filter(x=>x.id!==id);
   data.invoices=data.invoices.filter(i=>i.clientId!==id);
+  data.receipts=data.receipts.filter(r=>r.clientId!==id);
   saveData(); renderAll(); toast('تم الحذف 🗑');
 }
 function clearAll(){
   if(!confirm('أكيد تريد مسح كل البيانات؟')) return;
   takeSnapshot();
-  data={clients:[], invoices:[], expenses:[]};
+  data={clients:[], invoices:[], expenses:[], receipts:[]};
   saveData(); renderAll(); toast('تم المسح');
 }
 
@@ -317,18 +332,57 @@ function deleteExpense(id){
   saveData(); renderAll(); toast('تم حذف المصروف 🗑');
 }
 
+/* Receipts CRUD */
+function addReceipt(){
+  if(data.clients.length===0) return toast('أضف عميل أولاً');
+  const clientId=$('r_client').value;
+  const amount=Number($('r_amount').value);
+  const date=$('r_date').value || todayISO();
+  const note=$('r_note').value.trim();
+  if(!clientId) return toast('اختر عميل');
+  if(!Number.isFinite(amount)||amount<=0) return toast('المبلغ لازم موجب');
+  takeSnapshot();
+  data.receipts.push({id:uid(), clientId, amount, date, note});
+  saveData();
+  $('r_amount').value=''; $('r_date').value=''; $('r_note').value='';
+  renderAll(); toast('تمت إضافة قبض ✅');
+}
+function editReceipt(id){
+  const rec=data.receipts.find(x=>x.id===id); if(!rec) return;
+  const aStr=prompt('تعديل المبلغ:', String(rec.amount));
+  if(aStr===null) return;
+  const a=Number(aStr); if(!Number.isFinite(a)||a<=0) return toast('المبلغ لازم موجب');
+  const dt=prompt('تعديل التاريخ (YYYY-MM-DD):', rec.date || todayISO());
+  if(dt===null) return;
+  const date=dt.trim(); if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) return toast('صيغة التاريخ غلط');
+  const note=prompt('تعديل الملاحظة:', rec.note || '');
+  if(note===null) return;
+  takeSnapshot();
+  rec.amount=a; rec.date=date; rec.note=note.trim();
+  saveData(); renderAll(); toast('تم تعديل القبض ✏️');
+}
+function deleteReceipt(id){
+  if(!confirm('حذف القبض؟')) return;
+  takeSnapshot();
+  data.receipts=data.receipts.filter(x=>x.id!==id);
+  saveData(); renderAll(); toast('تم حذف القبض 🗑');
+}
+
 /* Render */
 function renderAll(){
   renderClients();
   renderClientSelects();
   renderInvoices();
+  renderReceipts();
   renderExpenses();
   renderSummary();
+  renderStatement();
+  renderReceiptSummary();
 }
 function renderClients(){
   const tbody=$('clientRows');
   if(data.clients.length===0){
-    tbody.innerHTML = `<tr><td colspan="4" class="muted">لا يوجد عملاء بعد.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" class="muted">لا يوجد عملاء بعد.</td></tr>`;
     return;
   }
   tbody.innerHTML = data.clients.map(c=>`
@@ -336,6 +390,7 @@ function renderClients(){
       <td>${escapeHtml(c.name)}</td>
       <td>${escapeHtml(c.phone||'—')}</td>
       <td>${escapeHtml(c.city||'—')}</td>
+      <td>${money(getClientTotals(c.id).balance)}</td>
       <td>
         <div class="actions-cell">
           <button class="btn small ghost" data-ec="${c.id}">✏️</button>
@@ -350,13 +405,23 @@ function renderClients(){
 function renderClientSelects(){
   const sel=$('i_client');
   const fsel=$('f_client');
+  const rsel=$('r_client');
+  const ssel=$('s_client');
   if(data.clients.length===0){
     sel.innerHTML = `<option value="">لا يوجد عملاء</option>`;
     fsel.innerHTML = `<option value="">كل العملاء</option>`;
+    if(rsel) rsel.innerHTML = `<option value="">لا يوجد عملاء</option>`;
+    if(ssel) ssel.innerHTML = `<option value="">اختر عميل</option>`;
     return;
   }
   sel.innerHTML = `<option value="">اختر عميل...</option>` + data.clients.map(c=>`<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
   fsel.innerHTML = `<option value="">كل العملاء</option>` + data.clients.map(c=>`<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+  if(rsel) rsel.innerHTML = `<option value="">اختر عميل...</option>` + data.clients.map(c=>`<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+  if(ssel){
+    const current=ssel.value;
+    ssel.innerHTML = `<option value="">اختر عميل...</option>` + data.clients.map(c=>`<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+    ssel.value = current && data.clients.some(c=>c.id===current) ? current : '';
+  }
 }
 function renderInvoices(){
   const tbody=$('invoiceRows');
@@ -426,6 +491,99 @@ function renderExpenses(){
   tbody.querySelectorAll('[data-de]').forEach(b=>b.addEventListener('click', ()=>deleteExpense(b.dataset.de)));
   if(window.renderMonthlyYearlyCharts) window.renderMonthlyYearlyCharts(data);
 }
+function renderReceipts(){
+  const tbody=$('receiptRows');
+  if(!tbody) return;
+  if(data.receipts.length===0){
+    tbody.innerHTML = `<tr><td colspan="5" class="muted">لا توجد قبوضات.</td></tr>`;
+    renderReceiptCards([]);
+    return;
+  }
+  const cmap=new Map(data.clients.map(c=>[c.id,c.name]));
+  const list=[...data.receipts].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  tbody.innerHTML = list.map(r=>`
+    <tr>
+      <td>${escapeHtml(cmap.get(r.clientId)||'—')}</td>
+      <td>${money(r.amount)}</td>
+      <td>${escapeHtml(r.date||'')}</td>
+      <td>${escapeHtml(r.note||'—')}</td>
+      <td>
+        <div class="actions-cell">
+          <button class="btn small ghost" data-er="${r.id}">✏️</button>
+          <button class="btn small ghost" style="border-color: rgba(255,59,48,.35); color: var(--danger);" data-dr="${r.id}">🗑</button>
+        </div>
+      </td>
+    </tr>
+  `).join('');
+  tbody.querySelectorAll('[data-er]').forEach(b=>b.addEventListener('click', ()=>editReceipt(b.dataset.er)));
+  tbody.querySelectorAll('[data-dr]').forEach(b=>b.addEventListener('click', ()=>deleteReceipt(b.dataset.dr)));
+  renderReceiptCards(list);
+}
+function renderReceiptSummary(){
+  const totalInvoices=data.invoices.reduce((s,x)=>s+(+x.amount||0),0);
+  const totalReceipts=data.receipts.reduce((s,x)=>s+(+x.amount||0),0);
+  const totalDue=totalInvoices-totalReceipts;
+  if($('r_total_in')) $('r_total_in').textContent=money(totalInvoices);
+  if($('r_total_pay')) $('r_total_pay').textContent=money(totalReceipts);
+  if($('r_total_due')){
+    $('r_total_due').textContent=money(totalDue);
+    $('r_total_due').style.color = totalDue>0 ? 'var(--danger)' : totalDue<0 ? '#34C759' : 'var(--text)';
+  }
+}
+function renderStatement(){
+  const tbody=$('statementRows');
+  const sel=$('s_client');
+  if(!tbody || !sel) return;
+  const clientId=sel.value;
+  if(!clientId){
+    tbody.innerHTML = `<tr><td colspan="5" class="muted">اختر عميل لعرض كشف الحساب.</td></tr>`;
+    return;
+  }
+  const client=data.clients.find(c=>c.id===clientId);
+  const entries=[
+    ...data.invoices.filter(i=>i.clientId===clientId).map(i=>({
+      type:'فاتورة',
+      desc:i.desc,
+      amount:+i.amount||0,
+      date:i.date
+    })),
+    ...data.receipts.filter(r=>r.clientId===clientId).map(r=>({
+      type:'قبض',
+      desc:r.note || 'قبض',
+      amount:-(+r.amount||0),
+      date:r.date
+    }))
+  ].sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+
+  if(entries.length===0){
+    tbody.innerHTML = `<tr><td colspan="5" class="muted">لا توجد حركة لهذا العميل.</td></tr>`;
+    return;
+  }
+
+  let running=0;
+  tbody.innerHTML = entries.map(e=>{
+    running += e.amount;
+    const amt = e.amount >= 0 ? money(e.amount) : `-${money(Math.abs(e.amount))}`;
+    return `
+      <tr>
+        <td>${escapeHtml(e.type)}</td>
+        <td>${escapeHtml(e.desc)}</td>
+        <td>${amt}</td>
+        <td>${escapeHtml(e.date||'')}</td>
+        <td>${money(running)}</td>
+      </tr>
+    `;
+  }).join('');
+  if(client) {
+    const totals=getClientTotals(clientId);
+    tbody.insertAdjacentHTML('beforeend', `
+      <tr>
+        <td colspan="4"><strong>الرصيد النهائي (${escapeHtml(client.name)})</strong></td>
+        <td><strong>${money(totals.balance)}</strong></td>
+      </tr>
+    `);
+  }
+}
 function renderSummary(){
   const tin=data.invoices.reduce((s,x)=>s+(+x.amount||0),0);
   const tex=data.expenses.reduce((s,x)=>s+(+x.amount||0),0);
@@ -442,6 +600,7 @@ function exportAllCSV(){
   const rows=[
     ['النوع','العميل','الوصف','المبلغ','التاريخ'],
     ...data.invoices.map(i=>['فاتورة',cmap.get(i.clientId)||'',i.desc,i.amount,i.date]),
+    ...data.receipts.map(r=>['قبض',cmap.get(r.clientId)||'',r.note||'',r.amount,r.date]),
     ...data.expenses.map(e=>['مصروف','',e.desc,e.amount,e.date])
   ];
   const line=(r)=>r.map(v=>`"${String(v??'').replaceAll('"','""')}"`).join(',');
@@ -473,7 +632,10 @@ async function restoreJSON(){
       return toast('الملف مو بصيغة صحيحة');
     }
     takeSnapshot();
-    data=imported;
+    data={
+      ...imported,
+      receipts: Array.isArray(imported.receipts) ? imported.receipts : []
+    };
     saveData(); renderAll();
     toast('تم الاسترجاع ✅');
   }catch{ toast('فشل قراءة الملف'); }
@@ -517,6 +679,7 @@ function printFullReportPDF(){
 
   const invRows = data.invoices.map(i=>`<tr><td>${escapeHtml(i.desc)}</td><td>${i.amount}</td><td>${escapeHtml(i.date||'')}</td></tr>`).join('');
   const expRows = data.expenses.map(e=>`<tr><td>${escapeHtml(e.desc)}</td><td>${e.amount}</td><td>${escapeHtml(e.date||'')}</td></tr>`).join('');
+  const recRows = data.receipts.map(r=>`<tr><td>${escapeHtml(r.note||'قبض')}</td><td>${r.amount}</td><td>${escapeHtml(r.date||'')}</td></tr>`).join('');
 
   w.document.write(`
   <html dir="rtl" lang="ar"><head><meta charset="UTF-8"><title>تقرير كامل</title>
@@ -560,7 +723,68 @@ function printFullReportPDF(){
       </div>
     </div>
 
+    <div class="page">
+      <div class="card">
+        <h2>💵 القبوضات</h2>
+        <table>
+          <tr><th>الملاحظة</th><th>المبلغ</th><th>التاريخ</th></tr>
+          ${recRows || '<tr><td colspan="3">لا توجد قبوضات</td></tr>'}
+        </table>
+      </div>
+    </div>
+
     <script>window.print()</script>
+  </body></html>`);
+  w.document.close();
+}
+
+/* PDF (client statement) */
+function printStatementPDF(){
+  const clientId=$('s_client')?.value;
+  if(!clientId) return toast('اختر عميل أولاً');
+  const client=data.clients.find(c=>c.id===clientId);
+  if(!client) return toast('العميل غير موجود');
+  const entries=[
+    ...data.invoices.filter(i=>i.clientId===clientId).map(i=>({
+      type:'فاتورة',
+      desc:i.desc,
+      amount:+i.amount||0,
+      date:i.date
+    })),
+    ...data.receipts.filter(r=>r.clientId===clientId).map(r=>({
+      type:'قبض',
+      desc:r.note || 'قبض',
+      amount:-(+r.amount||0),
+      date:r.date
+    }))
+  ].sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+
+  const rows=entries.map(e=>{
+    const amt = e.amount >= 0 ? e.amount : `-${Math.abs(e.amount)}`;
+    return `<tr><td>${escapeHtml(e.type)}</td><td>${escapeHtml(e.desc)}</td><td>${amt}</td><td>${escapeHtml(e.date||'')}</td></tr>`;
+  }).join('');
+  const totals=getClientTotals(clientId);
+  const w=window.open('','_blank');
+  w.document.write(`
+  <html dir="rtl" lang="ar"><head><meta charset="UTF-8"><title>كشف حساب - ${escapeHtml(client.name)}</title>
+  <style>
+  body{font-family:-apple-system,Arial;background:#f5f5f7;margin:40px}
+  .card{background:#fff;border-radius:22px;padding:24px}
+  table{width:100%;border-collapse:collapse;margin-top:14px}
+  th,td{padding:12px;border-bottom:1px solid #e5e7eb;text-align:right}
+  th{color:#6b7280}
+  .net{font-weight:900;color:${totals.balance>=0?'#FF3B30':'#34C759'}}
+  </style></head><body>
+  <div class="card">
+    <h1>🧾 كشف حساب العميل</h1>
+    <h3>${escapeHtml(client.name)}</h3>
+    <table>
+      <tr><th>النوع</th><th>الوصف</th><th>المبلغ</th><th>التاريخ</th></tr>
+      ${rows || '<tr><td colspan="4">لا توجد حركة</td></tr>'}
+      <tr><th colspan="3">الرصيد النهائي</th><td class="net">${totals.balance}</td></tr>
+    </table>
+  </div>
+  <script>window.print()</script>
   </body></html>`);
   w.document.close();
 }
@@ -579,6 +803,9 @@ function renderClientCards(){
         <div>
           <div class="item-title">${escapeHtml(c.name)}</div>
           <div class="item-sub">${escapeHtml(c.phone||'—')} • ${escapeHtml(c.city||'—')}</div>
+          <div class="item-meta">
+            <span class="pill" style="background:rgba(255,59,48,.10);border-color:rgba(255,59,48,.18);color:var(--danger)">الرصيد: ${money(getClientTotals(c.id).balance)}</span>
+          </div>
         </div>
         <div class="item-actions">
           <button class="btn small ghost" data-ec="${c.id}">✏️</button>
@@ -645,6 +872,35 @@ function renderExpenseCards(list){
   `).join('');
   box.querySelectorAll('[data-ee]').forEach(b=>b.addEventListener('click', ()=>editExpense(b.dataset.ee)));
   box.querySelectorAll('[data-de]').forEach(b=>b.addEventListener('click', ()=>deleteExpense(b.dataset.de)));
+}
+
+function renderReceiptCards(list){
+  const box=document.getElementById('receiptCards'); if(!box) return;
+  const cmap=new Map(data.clients.map(c=>[c.id,c.name]));
+  if(!list || list.length===0){
+    box.innerHTML = `<div class="item-card"><div class="item-title">لا توجد قبوضات</div><div class="item-sub">أضف قبض من الأعلى.</div></div>`;
+    return;
+  }
+  box.innerHTML = list.map(r=>`
+    <div class="item-card">
+      <div class="item-head">
+        <div>
+          <div class="item-title">${escapeHtml(cmap.get(r.clientId)||'—')}</div>
+          <div class="item-sub">${escapeHtml(r.note||'قبض')}</div>
+          <div class="item-meta">
+            <span class="pill">${money(r.amount)}</span>
+            <span class="pill" style="background:rgba(107,114,128,.10);border-color:rgba(107,114,128,.18);color:var(--muted)">${escapeHtml(r.date||'')}</span>
+          </div>
+        </div>
+        <div class="item-actions">
+          <button class="btn small ghost" data-er="${r.id}">✏️</button>
+          <button class="btn small ghost" style="border-color: rgba(255,59,48,.35); color: var(--danger);" data-dr="${r.id}">🗑</button>
+        </div>
+      </div>
+    </div>
+  `).join('');
+  box.querySelectorAll('[data-er]').forEach(b=>b.addEventListener('click', ()=>editReceipt(b.dataset.er)));
+  box.querySelectorAll('[data-dr]').forEach(b=>b.addEventListener('click', ()=>deleteReceipt(b.dataset.dr)));
 }
 
 /* Patch renderAll to include cards */
